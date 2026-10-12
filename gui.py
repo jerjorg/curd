@@ -658,11 +658,28 @@ class TermsView(QWidget):
             body = "".join(rows) or f"<span style='color:{INK_3}'>None in this plan</span>"
             return f"<p style='margin-top:18px; margin-bottom:6px'>{heading(title)}</p>{body}"
 
-        prereqs = []
+        # Each planned prerequisite course once, with what it covers beneath it
+        covers: dict[CourseId, list[str]] = {}
+        missing = []
         for dep in self.prereq_reqs(c_id):
-            planned = [course_line(o) for o in sorted(self.catalog.course_requirements.get(dep, ())) if o in term_of]
-            courses = "<br>".join(planned) or f"<span style='color:{CRIT}'>Not in plan</span>"
-            prereqs.append(f"<p style='margin-bottom:10px'><span style='font-size:11px; color:{INK_3}'>{escape(dep.name)}</span><br>{courses}</p>")
+            planned = [o for o in self.catalog.course_requirements.get(dep, ()) if o in term_of]
+            for o in planned:
+                covers.setdefault(o, []).append(dep.name)
+            if not planned:
+                missing.append(dep.name)
+
+        def topics(names):
+            # "Discrete math: sets", "Discrete math: graphs" -> "Discrete math: sets, graphs"
+            groups: dict[str, list[str]] = {}
+            for name in names:
+                prefix, _, rest = name.rpartition(": ")
+                groups.setdefault(prefix, []).append(rest)
+            text = "; ".join(f"{prefix}: {', '.join(rest)}" if prefix else ", ".join(rest) for prefix, rest in groups.items())
+            return f"<br><span style='font-size:11px; color:{INK_3}'>{escape(text)}</span>"
+
+        prereqs = [f"<p style='margin-bottom:10px'>{course_line(o)}{topics(names)}</p>" for o, names in sorted(covers.items())]
+        if missing:
+            prereqs.append(f"<p style='margin-bottom:10px'><span style='color:{CRIT}'>Not in plan</span>{topics(missing)}</p>")
         unlocks = [course_line(o) for o in sorted(term_of)
                    if any(c_id in self.catalog.course_requirements.get(dep, ()) for dep in self.prereq_reqs(o))]
 
