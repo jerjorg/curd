@@ -6,10 +6,14 @@ from model import Course, CourseId, Catalog, ProgramId
 
 
 class CourseView(QListWidgetItem):
-    def __init__(self, course: Course, lw: QListWidget):
+    def __init__(self, course: Course, elective: bool, lw: QListWidget):
         super().__init__(f"{course.c_id} ({course.creds} cr)", lw)
         self.course = course.c_id
-        self.setToolTip(course.title)
+        self.setToolTip(f"{course.title} (elective)" if elective else course.title)
+        if elective:
+            font = self.font()
+            font.setItalic(True)
+            self.setFont(font)
         # Dropped items are rebuilt as plain QListWidgetItems, so keep the id in the item data
         self.setData(Qt.ItemDataRole.UserRole, course.c_id)
 
@@ -39,8 +43,9 @@ class TermListWidget(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDragDropOverwriteMode(False)
 
+        terms_view = term_view.terms_view
         for course in courses:
-            CourseView(term_view.terms_view.catalog.courses[course], self)
+            CourseView(terms_view.catalog.courses[course], course not in terms_view.required, self)
 
     def dragEnterEvent(self, event):
         # TODO
@@ -114,7 +119,9 @@ class TermsView(QWidget):
 
         layout = QHBoxLayout(self)
 
-        schedule = catalog.generate_schedule(pid)
+        scheduler = catalog.get_scheduler(pid)
+        schedule = scheduler.generate_schedule()
+        self.required = scheduler.required
 
         for index, (_, classes) in enumerate(schedule.schedule):
             term_list = TermView(classes, index + 1, self)
