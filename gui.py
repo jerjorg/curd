@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QToolTip, QMenu, QPushButton, QToolButton, QLineEdit, QCompleter, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QStringListModel, QTimer
-from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QKeySequence, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QKeySequence, QPainter
 import sys
 
 from model import Course, CourseId, Catalog, ProgramId, Requirement
@@ -107,6 +107,11 @@ class CourseDelegate(QStyledItemDelegate):
         title_rect = QFontMetrics(self.title_font).boundingRect(QRect(inner.left(), first.bottom() + 3, inner.width(), 1000), flags, title)
         return first, title_rect
 
+    def close_rect(self, card: QRect) -> QRect:
+        """The × in a card's top-right corner, shown in place of the credits while the card is hovered."""
+        first, _ = self.text_rects(card, "")
+        return QRect(first.right() - first.height() + 1, first.top(), first.height(), first.height())
+
     def sizeHint(self, option, index):
         course = self.course(index)
         if course is None:
@@ -126,16 +131,16 @@ class CourseDelegate(QStyledItemDelegate):
         elective = c_id not in tv.required
         bad = c_id in tv.conflicts
         done = c_id in tv.done
-        card = option.rect.adjusted(0, 0, -1, -1)
+        card = option.rect
         painter.save()
         if tv.lit and c_id not in tv.lit:
             painter.setOpacity(0.25)
         elif done:
             painter.setOpacity(0.5)
         painter.fillRect(card, QColor(ACCENT_SOFT if selected else CRIT_SOFT if bad else "white"))
-        painter.fillRect(card.left(), card.top(), self.STRIPE, card.height() + 1, QColor(ELECTIVE if elective else REQUIRED))
+        painter.fillRect(card.left(), card.top(), self.STRIPE, card.height(), QColor(ELECTIVE if elective else REQUIRED))
         if bad:
-            band = QRect(card.left(), card.bottom() - self.BAND + 1, card.width() + 1, self.BAND)
+            band = QRect(card.left(), card.bottom() - self.BAND + 1, card.width(), self.BAND)
             painter.fillRect(band, QColor(CRIT))
             painter.setPen(QColor("white"))
             band_font = QFont(self.title_font)
@@ -144,21 +149,32 @@ class CourseDelegate(QStyledItemDelegate):
             painter.setFont(band_font)
             painter.drawText(band, Qt.AlignmentFlag.AlignCenter, "WILL NOT WORK")
 
-        # The outline goes on last, over the stripe and band
+        # The outline goes on last, over the stripe and band. It's four bars inside the card rather than a pen,
+        # which centers on the edge and so pokes half its width out past the stripe on high-DPI screens.
         if bad:
-            painter.setPen(QPen(QColor(CRIT), 2))
+            color, width = CRIT, 2
         elif c_id in tv.lit:
-            painter.setPen(QPen(QColor(ACCENT), 3 if c_id == tv.hovered else 2))
+            color, width = ACCENT, 3 if c_id == tv.hovered else 2
         else:
-            painter.setPen(QColor(ACCENT if selected else INK_3 if c_id == tv.hovered else LINE))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(card)
+            color, width = ACCENT if selected else INK_3 if c_id == tv.hovered else LINE, 1
+        for edge in (QRect(card.left(), card.top(), card.width(), width),
+                     QRect(card.left(), card.bottom() - width + 1, card.width(), width),
+                     QRect(card.left(), card.top(), width, card.height()),
+                     QRect(card.right() - width + 1, card.top(), width, card.height())):
+            painter.fillRect(edge, QColor(color))
 
-        first, title = self.text_rects(option.rect, course.title)  # the rect sizeHint measured, not the 1px-smaller border
+        first, title = self.text_rects(card, course.title)
         painter.setFont(self.code_font)
         painter.setPen(QColor(INK_3))
         creds = f"{course.creds} cr"
-        painter.drawText(first, Qt.AlignmentFlag.AlignRight, creds)
+        if c_id == tv.hovered:
+            close = self.close_rect(option.rect)
+            if self.lw.over_close:
+                painter.fillRect(close, QColor(CRIT))
+                painter.setPen(QColor("white"))
+            painter.drawText(close, Qt.AlignmentFlag.AlignCenter, "×")
+        else:
+            painter.drawText(first, Qt.AlignmentFlag.AlignRight, creds)
         painter.setPen(QColor(INK))
         code_width = first.width() - QFontMetrics(self.code_font).horizontalAdvance(creds + " ")
         code = QFontMetrics(self.code_font).elidedText(course_label(c_id), Qt.TextElideMode.ElideRight, code_width)
@@ -205,11 +221,34 @@ class TermListWidget(QListWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.setMouseTracking(True)  # hover tracing
+        self.over_close = False  # the pointer is on the hovered card's ×
         self.itemClicked.connect(lambda item: term_view.terms_view.show_details(item.data(Qt.ItemDataRole.UserRole)))
 
     def selected_ids(self) -> list[CourseId]:
         """The selected courses, in the order they appear in the term."""
         return [self.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.count()) if self.item(i).isSelected()]
+
+    def close_hit(self, pos) -> QListWidgetItem | None:
+        """The card whose × is under `pos`. Only a hovered card shows its ×, so after a removal the card
+        that slides up under the pointer can't be removed by a second click until the mouse moves."""
+        item = self.itemAt(pos)
+        if item and item.data(Qt.ItemDataRole.UserRole) == self.term_view.terms_view.hovered \
+                and self.itemDelegate().close_rect(self.visualItemRect(item)).contains(pos):
+            return item
+        return None
+
+    def set_over_close(self, over: bool):
+        if over != self.over_close:
+            self.over_close = over
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if over else Qt.CursorShape.ArrowCursor)
+            self.viewport().update()
+
+    def mousePressEvent(self, event):
+        item = self.close_hit(event.position().toPoint())
+        if item and event.button() == Qt.MouseButton.LeftButton:
+            self.term_view.terms_view.remove_courses([item.data(Qt.ItemDataRole.UserRole)])
+        else:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
@@ -217,9 +256,11 @@ class TermListWidget(QListWidget):
         gap = QPoint(0, self.spacing())
         item = self.itemAt(pos) or self.itemAt(pos - gap) or self.itemAt(pos + gap)
         self.term_view.terms_view.hover(item.data(Qt.ItemDataRole.UserRole) if item else None)
+        self.set_over_close(self.close_hit(pos) is not None)
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
+        self.set_over_close(False)
         self.term_view.terms_view.hover(None)
         super().leaveEvent(event)
 
@@ -311,10 +352,21 @@ class TermListWidget(QListWidget):
 class CourseSearch(QLineEdit):
     """The "+ Add course" box: clicking it lists the courses to choose from, and typing narrows them."""
 
+    PROMPT = "+ Add course"
+
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         self.completer().setCompletionPrefix(self.text())
         self.completer().complete()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.setPlaceholderText("")  # macOS keeps showing it while the box has focus
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if event.reason() != Qt.FocusReason.PopupFocusReason:  # opening the course list isn't leaving the box
+            self.setPlaceholderText(self.PROMPT)
 
 
 class TermView(QFrame):
@@ -337,7 +389,7 @@ class TermView(QFrame):
         header_layout.addWidget(remove)
 
         # Choosing a course here adds it to this term; the choices (courses not yet planned) are kept current by load()
-        self.adder = CourseSearch(placeholderText="+ Add course", objectName="add")
+        self.adder = CourseSearch(placeholderText=CourseSearch.PROMPT, objectName="add")
         self.choices = QStringListModel()
         completer = QCompleter(self.choices, self.adder)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -587,8 +639,7 @@ class TermsView(QWidget):
             planned = sorted((term_of[o], o) for o in self.catalog.course_requirements.get(dep, ()) if o in term_of)
             where = ", ".join(f"{course_label(o)} (Term {t + 1})" for t, o in planned)
             prereqs.append(f"{escape(dep.name)}: {where or f'<span style=color:{CRIT}>not in plan</span>'}")
-        unlocks = [f"{course_label(o)} (Term {t + 1})" for o, t in sorted(term_of.items(), key=lambda p: p[1])
-                   if self.reqs_of[c_id] & set(self.prereq_reqs(o))]
+        unlocks = [course_label(o) for o in sorted(term_of) if self.reqs_of[c_id] & set(self.prereq_reqs(o))]
         status = ["Required" if c_id in self.required else "Elective", f"Term {term_of[c_id] + 1}", f"{course.creds} credits"]
         problems = self.conflicts.get(c_id)
         self.details_text.setText(
