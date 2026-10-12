@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QListWidget, QListWidgetItem, QListView, QAbstractItemView, QVBoxLayout, QLabel,
     QStyle, QStyledItemDelegate, QToolTip, QMenu, QPushButton, QToolButton, QLineEdit, QCompleter, QScrollArea,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QTimer
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QStringListModel, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QKeySequence, QPainter, QPen
 import sys
 
@@ -308,6 +308,15 @@ class TermListWidget(QListWidget):
         return f"Term {self.term_view.term_number}"
 
 
+class CourseSearch(QLineEdit):
+    """The "+ Add course" box: clicking it lists the courses to choose from, and typing narrows them."""
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.completer().setCompletionPrefix(self.text())
+        self.completer().complete()
+
+
 class TermView(QFrame):
     def __init__(self, term_number: int, terms_view: TermsView):
         super().__init__(terms_view)
@@ -327,12 +336,17 @@ class TermView(QFrame):
         remove.clicked.connect(lambda: terms_view.remove_term(terms_view.terms.index(self)))
         header_layout.addWidget(remove)
 
-        # Choosing a course here adds it to this term, or moves it here if it is already planned
-        self.adder = QLineEdit(placeholderText="+ Add course", objectName="add")
-        completer = QCompleter(list(terms_view.entries), self.adder)
+        # Choosing a course here adds it to this term; the choices (courses not yet planned) are kept current by load()
+        self.adder = CourseSearch(placeholderText="+ Add course", objectName="add")
+        self.choices = QStringListModel()
+        completer = QCompleter(self.choices, self.adder)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setMaxVisibleItems(12)
         completer.popup().setMinimumWidth(380)
+        # The popup is its own window, outside the planner's stylesheet
+        completer.popup().setStyleSheet(f"QListView {{ background: white; color: {INK}; border: 1px solid {LINE}; "
+                                        f"selection-background-color: {ACCENT_SOFT}; selection-color: {INK}; }}")
         completer.activated[str].connect(self.add_course)
         # Enter without picking a suggestion adds the first one
         self.adder.returnPressed.connect(lambda: self.add_course(completer.currentCompletion()))
@@ -435,7 +449,7 @@ class TermsView(QWidget):
         self.load([sorted(classes) for _, classes in schedule.schedule], set())
 
         legend = (f'<span style="color:{REQUIRED}">■</span> Required &nbsp; <span style="color:{ELECTIVE}">■</span> Elective'
-                  " &nbsp;·&nbsp; Hover a course to trace its prerequisites, click it for details, right-click to move, mark done or remove")
+                  " &nbsp;·&nbsp; Hover a course to trace its prerequisites, click it for details, right-click to move or remove")
         layout.addWidget(QLabel(legend, objectName="legend"))
 
     def plan(self) -> Plan:
@@ -456,6 +470,10 @@ class TermsView(QWidget):
             for c_id in c_ids:
                 CourseView(self.catalog.courses[c_id], term.lw)
             term.update_label()
+        planned = {c_id for c_ids in terms for c_id in c_ids}
+        choices = [entry for entry, c_id in self.entries.items() if c_id not in planned]
+        for term in self.terms:
+            term.choices.setStringList(choices)
         self.check_prereqs()
 
     def change(self, terms: list[list[CourseId]], done: set[CourseId] | None = None):
