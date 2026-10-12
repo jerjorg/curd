@@ -160,6 +160,17 @@ class Catalog:
                 result.add_edge(pre, post)
         return Catalog.reduce_graph(result)
 
+    def prereq_requirements(self, c_id: CourseId) -> set[Requirement]:
+        """The requirements that must be met before taking `c_id`: those that the
+        requirements it satisfies depend on, other than ones it meets itself."""
+        deps = {
+            dep
+            for req, c_ids in self.course_requirements.items()
+            if c_id in c_ids
+            for dep in self.requirement_deps.get(req, ())
+        }
+        return {dep for dep in deps if c_id not in self.course_requirements.get(dep, ())}
+
     def select_courses(self, p_id: str | ProgramId) -> Tuple[set[CourseId], set[CourseId]]:
         """
         Select courses sufficient to match every requirement. When there are
@@ -204,10 +215,18 @@ class Catalog:
         )
         random.shuffle(elective_options)
         while total_elective < self.limits.program_credit_limit - total_required:
-            if not elective_options:
+            # Only take an elective whose prerequisites are among the courses chosen so far
+            chosen = required | electives
+            ready = [
+                c
+                for c in elective_options
+                if all(self.course_requirements.get(dep, set()) & chosen for dep in self.prereq_requirements(c))
+            ]
+            if not ready:
                 print("Warning: insufficient electives to complete the program")
                 break
-            selection = elective_options.pop()
+            selection = ready[-1]
+            elective_options.remove(selection)
             electives.add(selection)
             total_elective += self.courses[selection].creds
 

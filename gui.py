@@ -1,4 +1,3 @@
-from collections import defaultdict
 from html import escape
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QListWidget, QListWidgetItem, QListView, QAbstractItemView, QVBoxLayout, QLabel,
@@ -13,7 +12,7 @@ from model import Course, CourseId, Catalog, ProgramId, Requirement
 # UVU web palette
 INK, INK_2, INK_3 = "#292929", "#454543", "#63615E"
 LINE, LINE_SOFT = "#CFCFCC", "#E2E2E0"
-ACCENT, ACCENT_SOFT = "#275D38", "#E9F0EB"
+ACCENT, ACCENT_SOFT, ACCENT_INK = "#275D38", "#E9F0EB", "#1E482C"
 CRIT, CRIT_SOFT, CRIT_LINE = "#8A2B1A", "#F9E7E3", "#DFA898"
 REQUIRED, ELECTIVE = ACCENT, "#D2AC5F"
 
@@ -23,6 +22,11 @@ QLabel {{ color: {INK}; }}
 #title {{ color: {INK}; font-size: 20px; font-weight: bold; }}
 #legend {{ color: {INK_3}; }}
 #scroll, #terms {{ background: transparent; border: none; }}
+#scroll QScrollBar:horizontal {{ height: 10px; background: {LINE_SOFT}; border: none; border-radius: 5px; }}
+#scroll QScrollBar::handle:horizontal {{ background: {INK_3}; border-radius: 5px; min-width: 40px; }}
+#scroll QScrollBar::handle:horizontal:hover {{ background: {INK}; }}
+#scroll QScrollBar::add-line:horizontal, #scroll QScrollBar::sub-line:horizontal {{ width: 0; }}
+#scroll QScrollBar::add-page:horizontal, #scroll QScrollBar::sub-page:horizontal {{ background: none; }}
 TermView, #details {{ background: white; border: 1px solid {LINE}; }}
 #header {{ border-bottom: 1px solid {LINE_SOFT}; }}
 #term-name {{ color: {INK}; font-weight: bold; }}
@@ -398,7 +402,9 @@ class TermView(QFrame):
         completer.popup().setMinimumWidth(380)
         # The popup is its own window, outside the planner's stylesheet
         completer.popup().setStyleSheet(f"QListView {{ background: white; color: {INK}; border: 1px solid {LINE}; "
-                                        f"selection-background-color: {ACCENT_SOFT}; selection-color: {INK}; }}")
+                                        f"selection-background-color: {ACCENT_SOFT}; selection-color: {INK}; }}"
+                                        f"QListView::item:hover {{ background: {ACCENT_SOFT}; }}")
+        completer.popup().viewport().setAttribute(Qt.WidgetAttribute.WA_Hover)  # highlight the course under the pointer
         completer.activated[str].connect(self.add_course)
         # Enter without picking a suggestion adds the first one
         self.adder.returnPressed.connect(lambda: self.add_course(completer.currentCompletion()))
@@ -447,10 +453,6 @@ class TermsView(QWidget):
 
         # "CS 1400  Fundamentals of Programming" -> its id, for the add-course boxes
         self.entries = {f"{course_label(c_id)}  {course.title}": c_id for c_id, course in sorted(catalog.courses.items())}
-        self.reqs_of: dict[CourseId, set[Requirement]] = defaultdict(set)
-        for req, c_ids in catalog.course_requirements.items():
-            for c_id in c_ids:
-                self.reqs_of[c_id].add(req)
         # Every course that must come before each course, for hover tracing
         self.closure = Catalog.close_graph(catalog.build_courses_graph())
         self.closure.add_nodes_from(catalog.courses)
@@ -475,7 +477,7 @@ class TermsView(QWidget):
 
         terms = QWidget(objectName="terms")
         self.terms_layout = QHBoxLayout(terms)
-        self.terms_layout.setContentsMargins(0, 0, 0, 0)
+        self.terms_layout.setContentsMargins(0, 0, 0, 8)  # room between the terms and the scrollbar
         self.terms_layout.setSpacing(10)
         scroll = QScrollArea(widgetResizable=True, objectName="scroll")
         scroll.setWidget(terms)
@@ -483,12 +485,13 @@ class TermsView(QWidget):
 
         self.details = QFrame(objectName="details", visible=False)
         self.details.setFixedWidth(300)
-        details_layout = QVBoxLayout(self.details)
-        close = QToolButton(text="×", objectName="close")
-        close.clicked.connect(lambda: self.show_details(None))
-        details_layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+        details_layout = QHBoxLayout(self.details)
+        details_layout.setContentsMargins(18, 14, 8, 14)
         self.details_text = QLabel(wordWrap=True, alignment=Qt.AlignmentFlag.AlignTop)
         details_layout.addWidget(self.details_text, 1)
+        close = QToolButton(text="×", objectName="close")
+        close.clicked.connect(lambda: self.show_details(None))
+        details_layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignTop)
 
         body = QHBoxLayout()
         body.addWidget(scroll, 1)
@@ -581,9 +584,8 @@ class TermsView(QWidget):
         return {c_id: index for index, term in enumerate(self.terms) for c_id in term.course_ids()}
 
     def prereq_reqs(self, c_id: CourseId) -> list[Requirement]:
-        """The requirements that must be met before taking `c_id`, other than ones it meets itself."""
-        deps = {dep for req in self.reqs_of[c_id] for dep in self.catalog.requirement_deps.get(req, ())}
-        return sorted(dep for dep in deps if c_id not in self.catalog.course_requirements.get(dep, ()))
+        """The requirements to meet before taking `c_id`, in a stable order for display."""
+        return sorted(self.catalog.prereq_requirements(c_id))
 
     def check_prereqs(self):
         """Find each course whose prerequisite is missing from the plan or scheduled no earlier
@@ -630,22 +632,40 @@ class TermsView(QWidget):
         if self.details_id is None:
             return
         course = self.catalog.courses[c_id]
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
 
-        def rows(items):
-            return "<br>".join(items) or f"<span style='color:{INK_3}'>None in this plan</span>"
+        def heading(text, color=INK_3):
+            return f"<span style='font-size:10px; font-weight:bold; letter-spacing:1px; color:{color}'>{text}</span>"
+
+        def chip(text, fg=ACCENT_INK, bg=ACCENT_SOFT):
+            return f"<span style='font-family:{mono}; background-color:{bg}; color:{fg}'>&nbsp;{text}&nbsp;</span>"
+
+        def chips(texts):
+            return "&nbsp; ".join(map(chip, texts))  # a plain space between highlighted spans collapses
+
+        def section(title, rows):
+            body = "".join(rows) or f"<span style='color:{INK_3}'>None in this plan</span>"
+            return f"<p style='margin-top:18px; margin-bottom:6px'>{heading(title)}</p>{body}"
 
         prereqs = []
         for dep in self.prereq_reqs(c_id):
-            planned = sorted((term_of[o], o) for o in self.catalog.course_requirements.get(dep, ()) if o in term_of)
-            where = ", ".join(f"{course_label(o)} (Term {t + 1})" for t, o in planned)
-            prereqs.append(f"{escape(dep.name)}: {where or f'<span style=color:{CRIT}>not in plan</span>'}")
-        unlocks = [course_label(o) for o in sorted(term_of) if self.reqs_of[c_id] & set(self.prereq_reqs(o))]
-        status = ["Required" if c_id in self.required else "Elective", f"Term {term_of[c_id] + 1}", f"{course.creds} credits"]
+            planned = [course_label(o) for o in sorted(self.catalog.course_requirements.get(dep, ())) if o in term_of]
+            courses = chips(planned) or chip("not in plan", CRIT, CRIT_SOFT)
+            prereqs.append(f"<p style='margin-bottom:8px'><span style='color:{INK_2}'>{escape(dep.name)}</span><br>{courses}</p>")
+        unlocks = [course_label(o) for o in sorted(term_of)
+                   if any(c_id in self.catalog.course_requirements.get(dep, ()) for dep in self.prereq_reqs(o))]
+
+        required = c_id in self.required
+        tag = chip(heading("REQUIRED" if required else "ELECTIVE", "white" if required else INK), bg=REQUIRED if required else ELECTIVE)
+        meta = [f"{course.creds} credits"] + (["Done"] if c_id in self.done else [])
         problems = self.conflicts.get(c_id)
+        warning = (f"<table width='100%' cellpadding='8' cellspacing='0' style='margin-top:14px; background-color:{CRIT_SOFT}'>"
+                   f"<tr><td>{heading('WILL NOT WORK', CRIT)}<br><span style='color:{CRIT}'>{'<br>'.join(map(escape, problems))}</span>"
+                   "</td></tr></table>") if problems else ""
         self.details_text.setText(
-            f"<p style='font-size:16px'><b>{course_label(c_id)}</b></p>"
-            f"<p style='font-size:15px'>{escape(course.title)}</p>"
-            f"<p style='color:{INK_3}'>{' · '.join(status + (['Done'] if c_id in self.done else []))}</p>"
-            + (f"<p style='color:{CRIT}'><b>WILL NOT WORK</b><br>{'<br>'.join(map(escape, problems))}</p>" if problems else "")
-            + f"<p><b>PREREQUISITES</b><br>{rows(prereqs)}</p><p><b>UNLOCKS</b><br>{rows(unlocks)}</p>"
+            f"<p style='margin:0'><span style='font-family:{mono}; font-size:16px; font-weight:bold'>{course_label(c_id)}</span>"
+            f"&nbsp;&nbsp;{tag}</p>"
+            f"<p style='margin-top:6px; margin-bottom:4px; font-size:16px; font-weight:bold'>{escape(course.title)}</p>"
+            f"<p style='margin:0; color:{INK_3}'>{' · '.join(meta)}</p>"
+            + warning + section("PREREQUISITES", prereqs) + section("UNLOCKS", [chips(unlocks)] if unlocks else [])
         )
