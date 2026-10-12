@@ -1,9 +1,9 @@
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QListWidget, QListWidgetItem, QListView, QAbstractItemView, QVBoxLayout, QLabel,
-    QStyle, QStyledItemDelegate,
+    QStyle, QStyledItemDelegate, QToolTip,
 )
 from PyQt6.QtCore import Qt, QRect, QSize
-from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QPen
 import sys
 
 from model import Course, CourseId, Catalog, ProgramId
@@ -34,9 +34,14 @@ TermView {{ border-color: {CRIT_LINE}; border-top: 3px solid {CRIT}; }}
 """
 
 
+def course_label(c_id: CourseId) -> str:
+    """How the planner shows a course, e.g. "CS 1400" rather than "CS_1400"."""
+    return f"{c_id.dept} {c_id.course_number}"
+
+
 class CourseView(QListWidgetItem):
     def __init__(self, course: Course, lw: QListWidget):
-        super().__init__(str(course.c_id), lw)
+        super().__init__(course_label(course.c_id), lw)
         self.course = course.c_id
         # Dropped items are rebuilt as plain QListWidgetItems, so keep the id in the item data
         self.setData(Qt.ItemDataRole.UserRole, course.c_id)
@@ -49,13 +54,15 @@ class CourseView(QListWidgetItem):
 
 
 class CourseDelegate(QStyledItemDelegate):
-    """Draws a course as a card: a required/elective stripe, the code and credits, and the title."""
+    """Draws a course as a card: a required/elective stripe, the code and credits, and the title.
+    A course scheduled no later than one of its prerequisites gets a "WILL NOT WORK" band."""
 
-    PAD, STRIPE = 7, 8
+    PAD, STRIPE, BAND = 7, 8, 15
 
     def __init__(self, lw: TermListWidget):
         super().__init__(lw)
         self.lw = lw
+        self.terms_view = lw.term_view.terms_view
         self.code_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self.code_font.setBold(True)
         self.title_font = QFont(lw.font())
@@ -63,7 +70,7 @@ class CourseDelegate(QStyledItemDelegate):
 
     def course(self, index) -> Course | None:
         c_id = index.data(Qt.ItemDataRole.UserRole)
-        return self.lw.term_view.terms_view.catalog.courses[c_id] if c_id else None
+        return self.terms_view.catalog.courses[c_id] if c_id else None
 
     def text_rects(self, card: QRect, title: str) -> tuple[QRect, QRect]:
         """Split a card into its first line (code and credits) and the wrapped title below it."""
@@ -79,34 +86,53 @@ class CourseDelegate(QStyledItemDelegate):
             return super().sizeHint(option, index)
         width = self.lw.viewport().width() - 2 * self.lw.spacing()
         _, title = self.text_rects(QRect(0, 0, width, 0), course.title)
-        return QSize(width, title.bottom() + self.PAD)
+        band = self.BAND if course.c_id in self.terms_view.conflicts else 0
+        return QSize(width, title.bottom() + self.PAD + band)
 
     def paint(self, painter, option, index):
         course = self.course(index)
         if course is None:
             return
         selected = option.state & QStyle.StateFlag.State_Selected
-        elective = course.c_id not in self.lw.term_view.terms_view.required
+        elective = course.c_id not in self.terms_view.required
+        bad = course.c_id in self.terms_view.conflicts
         card = option.rect.adjusted(0, 0, -1, -1)
         painter.save()
-        painter.setPen(QColor(ACCENT if selected else LINE))
-        painter.setBrush(QColor(ACCENT_SOFT if selected else "white"))
+        painter.setPen(QPen(QColor(CRIT), 2) if bad else QColor(ACCENT if selected else LINE))
+        painter.setBrush(QColor(ACCENT_SOFT if selected else CRIT_SOFT if bad else "white"))
         painter.drawRect(card)
         painter.fillRect(card.left(), card.top(), self.STRIPE, card.height() + 1, QColor(ELECTIVE if elective else REQUIRED))
+        if bad:
+            band = QRect(card.left(), card.bottom() - self.BAND + 1, card.width() + 1, self.BAND)
+            painter.fillRect(band, QColor(CRIT))
+            painter.setPen(QColor("white"))
+            band_font = QFont(self.title_font)
+            band_font.setBold(True)
+            band_font.setPointSizeF(band_font.pointSizeF() - 2)
+            painter.setFont(band_font)
+            painter.drawText(band, Qt.AlignmentFlag.AlignCenter, "WILL NOT WORK")
 
-        first, title = self.text_rects(card, course.title)
+        first, title = self.text_rects(option.rect, course.title)  # the rect sizeHint measured, not the 1px-smaller border
         painter.setFont(self.code_font)
         painter.setPen(QColor(INK_3))
         creds = f"{course.creds} cr"
         painter.drawText(first, Qt.AlignmentFlag.AlignRight, creds)
         painter.setPen(QColor(INK))
         code_width = first.width() - QFontMetrics(self.code_font).horizontalAdvance(creds + " ")
-        code = QFontMetrics(self.code_font).elidedText(str(course.c_id), Qt.TextElideMode.ElideRight, code_width)
+        code = QFontMetrics(self.code_font).elidedText(course_label(course.c_id), Qt.TextElideMode.ElideRight, code_width)
         painter.drawText(first, Qt.AlignmentFlag.AlignLeft, code)
         painter.setFont(self.title_font)
-        painter.setPen(QColor(INK_2))
+        painter.setPen(QColor(CRIT if bad else INK_2))
         painter.drawText(title, Qt.TextFlag.TextWordWrap, course.title)
         painter.restore()
+
+    def helpEvent(self, event, view, option, index):
+        course = self.course(index)
+        late = course and self.terms_view.conflicts.get(course.c_id)
+        if not late:
+            return super().helpEvent(event, view, option, index)
+        QToolTip.showText(event.globalPos(), "Must come after:\n" + "\n".join(late), view)
+        return True
 
 
 class TermListWidget(QListWidget):
@@ -201,14 +227,18 @@ class TermView(QFrame):
         self.lw.model().rowsRemoved.connect(self.update_label)
         self.update_label()
 
+    def course_ids(self) -> list[CourseId]:
+        # Dropped rows are inserted empty and filled in afterwards, so skip unset ones
+        ids = (self.lw.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lw.count()))
+        return [c_id for c_id in ids if c_id]
+
     def update_label(self):
         catalog = self.terms_view.catalog
-        # Dropped rows are inserted empty and filled in afterwards, so skip unset ones
-        ids = filter(None, (self.lw.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lw.count())))
-        total = sum(catalog.courses[c_id].creds for c_id in ids)
+        total = sum(catalog.courses[c_id].creds for c_id in self.course_ids())
         over = total > catalog.limits.term_credit_limit
         self.credits.setText(f"{total} cr")
         self.setStyleSheet(OVER_STYLE if over else "")
+        self.terms_view.check_prereqs()
 
 
 class TermsView(QWidget):
@@ -230,9 +260,31 @@ class TermsView(QWidget):
         schedule = scheduler.generate_schedule()
         self.required = scheduler.required
 
+        # Every course that must come before each planned course, as the scheduler sees it
+        courses = set().union(*(classes for _, classes in schedule.schedule))
+        self.prereqs = Catalog.close_graph(catalog.build_courses_graph(courses))
+        self.prereqs.add_nodes_from(courses)
+        self.conflicts: dict[CourseId, list[str]] = {}
+        self.terms: list[TermView] = []
+
         for index, (_, classes) in enumerate(schedule.schedule):
             term_list = TermView(classes, index + 1, self)
+            self.terms.append(term_list)
             terms.addWidget(term_list)
 
         legend = f'<span style="color:{REQUIRED}">■</span> Required &nbsp; <span style="color:{ELECTIVE}">■</span> Elective'
         layout.addWidget(QLabel(legend, objectName="legend"))
+
+    def check_prereqs(self):
+        """Find each course scheduled no later than one of its prerequisites, and redraw the
+        terms if that changed."""
+        term_of = {c_id: index for index, term in enumerate(self.terms) for c_id in term.course_ids()}
+        conflicts = {}
+        for c_id, index in term_of.items():
+            late = [p for p in self.prereqs.predecessors(c_id) if term_of.get(p, -1) >= index]
+            if late:
+                conflicts[c_id] = [f"{course_label(p)} (Term {term_of[p] + 1})" for p in sorted(late)]
+        if conflicts != self.conflicts:
+            self.conflicts = conflicts
+            for term in self.terms:
+                term.lw.scheduleDelayedItemsLayout()  # cards with a band are taller
