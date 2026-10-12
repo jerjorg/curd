@@ -485,13 +485,26 @@ class TermsView(QWidget):
 
         self.details = QFrame(objectName="details", visible=False)
         self.details.setFixedWidth(300)
-        details_layout = QHBoxLayout(self.details)
-        details_layout.setContentsMargins(18, 14, 8, 14)
-        self.details_text = QLabel(wordWrap=True, alignment=Qt.AlignmentFlag.AlignTop)
-        details_layout.addWidget(self.details_text, 1)
+        details_layout = QVBoxLayout(self.details)
+        details_layout.setContentsMargins(18, 10, 8, 14)
+        # The code and its Required/Elective tag are widgets, since rich text can't center text in a highlight
+        header = QHBoxLayout()
+        self.details_code = QLabel()
+        code_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        code_font.setPixelSize(16)
+        code_font.setBold(True)
+        self.details_code.setFont(code_font)
+        header.addWidget(self.details_code)
+        header.addSpacing(6)
+        self.details_tag = QLabel()
+        header.addWidget(self.details_tag)
+        header.addStretch()
         close = QToolButton(text="×", objectName="close")
         close.clicked.connect(lambda: self.show_details(None))
-        details_layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignTop)
+        header.addWidget(close)
+        details_layout.addLayout(header)
+        self.details_text = QLabel(wordWrap=True, alignment=Qt.AlignmentFlag.AlignTop)
+        details_layout.addWidget(self.details_text, 1)
 
         body = QHBoxLayout()
         body.addWidget(scroll, 1)
@@ -654,17 +667,17 @@ class TermsView(QWidget):
                    if any(c_id in self.catalog.course_requirements.get(dep, ()) for dep in self.prereq_reqs(o))]
 
         required = c_id in self.required
-        tag = (f"<span style='background-color:{REQUIRED if required else ELECTIVE}'>&nbsp;"
-               f"{heading('REQUIRED' if required else 'ELECTIVE', 'white' if required else INK)}&nbsp;</span>")
+        self.details_code.setText(course_label(c_id))
+        self.details_tag.setText("REQUIRED" if required else "ELECTIVE")
+        self.details_tag.setStyleSheet(f"background: {REQUIRED if required else ELECTIVE}; color: {'white' if required else INK}; "
+                                       "font-size: 10px; font-weight: bold; padding: 2px 6px;")
         meta = [f"{course.creds} credits"] + (["Done"] if c_id in self.done else [])
         problems = self.conflicts.get(c_id)
         warning = (f"<table width='100%' cellpadding='8' cellspacing='0' style='margin-top:14px; background-color:{CRIT_SOFT}'>"
                    f"<tr><td>{heading('WILL NOT WORK', CRIT)}<br><span style='color:{CRIT}'>{'<br>'.join(map(escape, problems))}</span>"
                    "</td></tr></table>") if problems else ""
         self.details_text.setText(
-            f"<p style='margin:0'><span style='font-family:{mono}; font-size:16px; font-weight:bold'>{course_label(c_id)}</span>"
-            f"&nbsp;&nbsp;{tag}</p>"
-            f"<p style='margin-top:6px; margin-bottom:4px; font-size:16px; font-weight:bold'>{escape(course.title)}</p>"
+            f"<p style='margin-top:2px; margin-bottom:4px; font-size:16px; font-weight:bold'>{escape(course.title)}</p>"
             f"<p style='margin:0; color:{INK_3}'>{' · '.join(meta)}</p>"
             + warning + section("PREREQUISITES", prereqs) + section("UNLOCKS", ["<br>".join(unlocks)] if unlocks else [])
         )
