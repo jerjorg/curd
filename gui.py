@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QStyle, QStyledItemDelegate, QToolTip, QMenu, QPushButton, QToolButton, QLineEdit, QCompleter, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QRect, QSize, QTimer
-from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QKeySequence, QPen
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QKeySequence, QPainter, QPen
 import sys
 
 from model import Course, CourseId, Catalog, ProgramId, Requirement
@@ -44,6 +44,11 @@ TermView {{ border-color: {CRIT_LINE}; border-top: 3px solid {CRIT}; }}
 #term-name, #term-credits {{ color: {CRIT}; }}
 """
 
+# Applied to the TermView courses are being dragged over
+TARGET_STYLE = f"""
+TermView {{ background: {ACCENT_SOFT}; border-color: {ACCENT}; }}
+"""
+
 Plan = tuple[list[list[CourseId]], set[CourseId]]
 
 
@@ -52,11 +57,19 @@ def course_label(c_id: CourseId) -> str:
     return f"{c_id.dept} {c_id.course_number}"
 
 
+def program_label(pid: ProgramId) -> str:
+    """How the planner shows a program, e.g. "CS B.S." rather than "CS_BS"."""
+    *field, degree = str(pid).split("_")
+    if field and degree.isupper() and len(degree) <= 3:
+        degree = ".".join(degree) + "."
+    return " ".join(field + [degree])
+
+
 class CourseView(QListWidgetItem):
     def __init__(self, course: Course, lw: QListWidget):
         super().__init__(course_label(course.c_id), lw)
         self.course = course.c_id
-        # Dropped items are rebuilt as plain QListWidgetItems, so keep the id in the item data
+        # The delegate and the plan read the course id from the item data
         self.setData(Qt.ItemDataRole.UserRole, course.c_id)
 
     def __str__(self):
@@ -171,12 +184,12 @@ class TermListWidget(QListWidget):
         # Selection (use ExtendedSelection if you want multi-select)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
 
-        # Enable drag & drop both ways and show indicator
+        # Enable drag & drop both ways; paintEvent draws the insertion line instead of Qt's indicator
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self.setDropIndicatorShown(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setSortingEnabled(True)
+        self.drop_row: int | None = None  # where dragged courses would land, while dragging over this term
 
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
@@ -192,7 +205,8 @@ class TermListWidget(QListWidget):
         self.itemClicked.connect(lambda item: term_view.terms_view.show_details(item.data(Qt.ItemDataRole.UserRole)))
 
     def selected_ids(self) -> list[CourseId]:
-        return [item.data(Qt.ItemDataRole.UserRole) for item in self.selectedItems()]
+        """The selected courses, in the order they appear in the term."""
+        return [self.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.count()) if self.item(i).isSelected()]
 
     def mouseMoveEvent(self, event):
         item = self.itemAt(event.position().toPoint())
@@ -225,36 +239,64 @@ class TermListWidget(QListWidget):
         menu.addAction("Remove", lambda *_: tv.remove_courses(ids))
         menu.exec(event.globalPos())
 
+    def insertion_row(self, pos) -> int:
+        """Where courses dropped at `pos` go: before the first card whose middle is below it."""
+        rows = range(self.count())
+        return next((row for row in rows if pos.y() < self.visualItemRect(self.item(row)).center().y()), self.count())
+
+    def set_drop_row(self, row: int | None):
+        """Show the insertion line before `row`, highlighting this term, or hide it with None."""
+        highlight_changed = (row is None) != (self.drop_row is None)
+        self.drop_row = row
+        if highlight_changed:
+            self.term_view.update_label()
+        self.viewport().update()
+
     def dragEnterEvent(self, event):
-        # TODO
-        if True:
+        # Only courses dragged from a term can be dropped
+        if isinstance(event.source(), TermListWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        # TODO
-        if True:
+        super().dragMoveEvent(event)  # auto-scrolls near the edges
+        if isinstance(event.source(), TermListWidget):
+            self.set_drop_row(self.insertion_row(event.position()))
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    def dropEvent(self, event):
-        # TODO
-        if True:
-            self.term_view.terms_view.remember()
-            super().dropEvent(event)
-        else:
-            event.ignore()
+    def dragLeaveEvent(self, event):
+        self.set_drop_row(None)
+        super().dragLeaveEvent(event)
 
-    def dropMimeData(self, index, data, action):
-        # A dropped item gets its text first; if that re-sorts the list, its
-        # remaining data (the course id) lands on the wrong item.
-        self.setSortingEnabled(False)
-        result = super().dropMimeData(index, data, action)
-        self.setSortingEnabled(True)
-        self.sortItems()
-        return result
+    def dropEvent(self, event):
+        source = event.source()
+        if not isinstance(source, TermListWidget):
+            event.ignore()
+            return
+        row = self.insertion_row(event.position())
+        self.set_drop_row(None)
+        tv = self.term_view.terms_view
+        tv.move_courses(source.selected_ids(), tv.terms.index(self.term_view), row)
+        # The plan was rebuilt with the courses moved, so the source must not remove them as well
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.drop_row is None:
+            return
+        if not self.count():
+            y = self.spacing()
+        elif self.drop_row == self.count():
+            y = self.visualItemRect(self.item(self.count() - 1)).bottom() + self.spacing()
+        else:
+            y = self.visualItemRect(self.item(self.drop_row)).top() - self.spacing()
+        painter = QPainter(self.viewport())
+        painter.fillRect(self.spacing(), y - 1, self.viewport().width() - 2 * self.spacing(), 3, QColor(ACCENT))
+        painter.end()
 
     def __str__(self):
         return f"Term {self.term_view.term_number}"
@@ -286,6 +328,8 @@ class TermView(QFrame):
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         completer.popup().setMinimumWidth(380)
         completer.activated[str].connect(self.add_course)
+        # Enter without picking a suggestion adds the first one
+        self.adder.returnPressed.connect(lambda: self.add_course(completer.currentCompletion()))
         self.adder.setCompleter(completer)
 
         self.lw = TermListWidget(self)
@@ -296,38 +340,34 @@ class TermView(QFrame):
         layout.addWidget(self.lw)
         layout.addWidget(self.adder)
 
-        self.lw.model().dataChanged.connect(self.update_label)
-        self.lw.model().rowsRemoved.connect(self.update_label)
-        self.update_label()
-
     def add_course(self, entry: str):
-        self.terms_view.move_courses([self.terms_view.entries[entry]], self.terms_view.terms.index(self))
-        QTimer.singleShot(0, self.adder.clear)  # the completer writes the chosen entry in after this
+        c_id = self.terms_view.entries.get(entry)
+        if c_id:
+            self.terms_view.move_courses([c_id], self.terms_view.terms.index(self))
+            QTimer.singleShot(0, self.adder.clear)  # the completer writes the chosen entry in after this
 
     def course_ids(self) -> list[CourseId]:
-        # Dropped rows are inserted empty and filled in afterwards, so skip unset ones
-        ids = (self.lw.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lw.count()))
-        return [c_id for c_id in ids if c_id]
+        return [self.lw.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lw.count())]
 
     def update_label(self):
         catalog = self.terms_view.catalog
         total = sum(catalog.courses[c_id].creds for c_id in self.course_ids())
         over = total > catalog.limits.term_credit_limit
         self.credits.setText(f"{total} cr")
-        self.setStyleSheet(OVER_STYLE if over else "")
-        self.terms_view.check_prereqs()
+        self.setStyleSheet((OVER_STYLE if over else "") + (TARGET_STYLE if self.lw.drop_row is not None else ""))
 
 
 class TermsView(QWidget):
     def __init__(self, catalog: Catalog, pid: ProgramId):
         super().__init__()
-        self.setWindowTitle(f"Graduation plan ({pid})")
+        self.setWindowTitle(f"Graduation plan ({program_label(pid)})")
         self.setStyleSheet(STYLE)
         self.resize(1480, 760)
         self.catalog = catalog
         self.terms: list[TermView] = []
         self.done: set[CourseId] = set()
         self.history: list[Plan] = []
+        self.future: list[Plan] = []  # plans undone, for redo
         self.conflicts: dict[CourseId, list[str]] = {}
         self.hovered: CourseId | None = None
         self.lit: set[CourseId] = set()  # the hovered course and its planned prerequisites and unlocks
@@ -346,12 +386,16 @@ class TermsView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 12)
         top = QHBoxLayout()
-        top.addWidget(QLabel(f"GRADUATION PLAN · {pid}", objectName="title"))
+        top.addWidget(QLabel(f"GRADUATION PLAN · {program_label(pid)}", objectName="title"))
         top.addStretch()
         self.undo_button = QPushButton("↩ Undo", enabled=False)
         self.undo_button.setShortcut(QKeySequence(QKeySequence.StandardKey.Undo))
         self.undo_button.clicked.connect(self.undo)
         top.addWidget(self.undo_button)
+        self.redo_button = QPushButton("↪ Redo", enabled=False)
+        self.redo_button.setShortcut(QKeySequence(QKeySequence.StandardKey.Redo))
+        self.redo_button.clicked.connect(self.redo)
+        top.addWidget(self.redo_button)
         add_term = QPushButton("+ Add term")
         add_term.clicked.connect(self.add_term)
         top.addWidget(add_term)
@@ -405,32 +449,45 @@ class TermsView(QWidget):
             term.lw.clear()
             for c_id in c_ids:
                 CourseView(self.catalog.courses[c_id], term.lw)
-            term.update_label()  # clear() resets the list without the signals update_label listens to
-
-    def remember(self):
-        """Save the plan before a change so it can be undone."""
-        self.history.append(self.plan())
-        self.undo_button.setEnabled(True)
+            term.update_label()
+        self.check_prereqs()
 
     def change(self, terms: list[list[CourseId]], done: set[CourseId] | None = None):
-        self.remember()
-        self.load(terms, self.done if done is None else done)
+        """Show an edited plan, remembering the current one for undo."""
+        done = self.done if done is None else set(done)
+        if (terms, done) == self.plan():
+            return  # e.g. a course dropped where it already was
+        self.history.append(self.plan())
+        self.future.clear()
+        self.load(terms, done)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.undo_button.setEnabled(bool(self.history))
+        self.redo_button.setEnabled(bool(self.future))
 
     def undo(self):
-        current = self.plan()
-        while self.history:
-            plan = self.history.pop()
-            if plan != current:  # skip snapshots of edits that changed nothing, like a drop in place
-                self.load(*plan)
-                break
-        self.undo_button.setEnabled(bool(self.history))
+        if self.history:
+            self.future.append(self.plan())
+            self.load(*self.history.pop())
+        self.update_buttons()
+
+    def redo(self):
+        if self.future:
+            self.history.append(self.plan())
+            self.load(*self.future.pop())
+        self.update_buttons()
 
     def remove_courses(self, c_ids: list[CourseId]):
         self.change([[c for c in term if c not in c_ids] for term in self.plan()[0]])
 
-    def move_courses(self, c_ids: list[CourseId], index: int):
-        terms = [[c for c in term if c not in c_ids] for term in self.plan()[0]]
-        terms[index] += c_ids
+    def move_courses(self, c_ids: list[CourseId], index: int, row: int | None = None):
+        """Move (or add) courses to term `index`, before its course at `row`, or at the end."""
+        terms = self.plan()[0]
+        row = len(terms[index]) if row is None else row
+        row -= sum(c_id in c_ids for c_id in terms[index][:row])  # courses moving down the same term free places above
+        terms = [[c for c in term if c not in c_ids] for term in terms]
+        terms[index][row:row] = c_ids
         self.change(terms)
 
     def set_done(self, c_ids: list[CourseId], done: bool):
