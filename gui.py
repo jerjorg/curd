@@ -132,14 +132,7 @@ class CourseDelegate(QStyledItemDelegate):
             painter.setOpacity(0.25)
         elif done:
             painter.setOpacity(0.5)
-        if bad:
-            painter.setPen(QPen(QColor(CRIT), 2))
-        elif c_id in tv.lit:
-            painter.setPen(QPen(QColor(ACCENT), 3 if c_id == tv.hovered else 2))
-        else:
-            painter.setPen(QColor(ACCENT if selected else INK_3 if c_id == tv.hovered else LINE))
-        painter.setBrush(QColor(ACCENT_SOFT if selected else CRIT_SOFT if bad else "white"))
-        painter.drawRect(card)
+        painter.fillRect(card, QColor(ACCENT_SOFT if selected else CRIT_SOFT if bad else "white"))
         painter.fillRect(card.left(), card.top(), self.STRIPE, card.height() + 1, QColor(ELECTIVE if elective else REQUIRED))
         if bad:
             band = QRect(card.left(), card.bottom() - self.BAND + 1, card.width() + 1, self.BAND)
@@ -150,6 +143,16 @@ class CourseDelegate(QStyledItemDelegate):
             band_font.setPointSizeF(band_font.pointSizeF() - 2)
             painter.setFont(band_font)
             painter.drawText(band, Qt.AlignmentFlag.AlignCenter, "WILL NOT WORK")
+
+        # The outline goes on last, over the stripe and band
+        if bad:
+            painter.setPen(QPen(QColor(CRIT), 2))
+        elif c_id in tv.lit:
+            painter.setPen(QPen(QColor(ACCENT), 3 if c_id == tv.hovered else 2))
+        else:
+            painter.setPen(QColor(ACCENT if selected else INK_3 if c_id == tv.hovered else LINE))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(card)
 
         first, title = self.text_rects(option.rect, course.title)  # the rect sizeHint measured, not the 1px-smaller border
         painter.setFont(self.code_font)
