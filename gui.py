@@ -12,7 +12,7 @@ from model import Course, CourseId, Catalog, ProgramId, Requirement
 # UVU web palette
 INK, INK_2, INK_3 = "#292929", "#454543", "#63615E"
 LINE, LINE_SOFT = "#CFCFCC", "#E2E2E0"
-ACCENT, ACCENT_SOFT, ACCENT_INK = "#275D38", "#E9F0EB", "#1E482C"
+ACCENT, ACCENT_SOFT = "#275D38", "#E9F0EB"
 CRIT, CRIT_SOFT, CRIT_LINE = "#8A2B1A", "#F9E7E3", "#DFA898"
 REQUIRED, ELECTIVE = ACCENT, "#D2AC5F"
 
@@ -637,11 +637,9 @@ class TermsView(QWidget):
         def heading(text, color=INK_3):
             return f"<span style='font-size:10px; font-weight:bold; letter-spacing:1px; color:{color}'>{text}</span>"
 
-        def chip(text, fg=ACCENT_INK, bg=ACCENT_SOFT):
-            return f"<span style='font-family:{mono}; background-color:{bg}; color:{fg}'>&nbsp;{text}&nbsp;</span>"
-
-        def chips(texts):
-            return "&nbsp; ".join(map(chip, texts))  # a plain space between highlighted spans collapses
+        def course_line(o):
+            return (f"<span style='font-family:{mono}; font-weight:bold'>{course_label(o)}</span>"
+                    f"&nbsp;&nbsp;<span style='color:{INK_2}'>{escape(self.catalog.courses[o].title)}</span>")
 
         def section(title, rows):
             body = "".join(rows) or f"<span style='color:{INK_3}'>None in this plan</span>"
@@ -649,14 +647,15 @@ class TermsView(QWidget):
 
         prereqs = []
         for dep in self.prereq_reqs(c_id):
-            planned = [course_label(o) for o in sorted(self.catalog.course_requirements.get(dep, ())) if o in term_of]
-            courses = chips(planned) or chip("not in plan", CRIT, CRIT_SOFT)
-            prereqs.append(f"<p style='margin-bottom:8px'><span style='color:{INK_2}'>{escape(dep.name)}</span><br>{courses}</p>")
-        unlocks = [course_label(o) for o in sorted(term_of)
+            planned = [course_line(o) for o in sorted(self.catalog.course_requirements.get(dep, ())) if o in term_of]
+            courses = "<br>".join(planned) or f"<span style='color:{CRIT}'>Not in plan</span>"
+            prereqs.append(f"<p style='margin-bottom:10px'><span style='font-size:11px; color:{INK_3}'>{escape(dep.name)}</span><br>{courses}</p>")
+        unlocks = [course_line(o) for o in sorted(term_of)
                    if any(c_id in self.catalog.course_requirements.get(dep, ()) for dep in self.prereq_reqs(o))]
 
         required = c_id in self.required
-        tag = chip(heading("REQUIRED" if required else "ELECTIVE", "white" if required else INK), bg=REQUIRED if required else ELECTIVE)
+        tag = (f"<span style='background-color:{REQUIRED if required else ELECTIVE}'>&nbsp;"
+               f"{heading('REQUIRED' if required else 'ELECTIVE', 'white' if required else INK)}&nbsp;</span>")
         meta = [f"{course.creds} credits"] + (["Done"] if c_id in self.done else [])
         problems = self.conflicts.get(c_id)
         warning = (f"<table width='100%' cellpadding='8' cellspacing='0' style='margin-top:14px; background-color:{CRIT_SOFT}'>"
@@ -667,5 +666,5 @@ class TermsView(QWidget):
             f"&nbsp;&nbsp;{tag}</p>"
             f"<p style='margin-top:6px; margin-bottom:4px; font-size:16px; font-weight:bold'>{escape(course.title)}</p>"
             f"<p style='margin:0; color:{INK_3}'>{' · '.join(meta)}</p>"
-            + warning + section("PREREQUISITES", prereqs) + section("UNLOCKS", [chips(unlocks)] if unlocks else [])
+            + warning + section("PREREQUISITES", prereqs) + section("UNLOCKS", ["<br>".join(unlocks)] if unlocks else [])
         )
