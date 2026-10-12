@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QListWidget, QListWidgetItem, QListView, QAbstractItemView, QVBoxLayout, QLabel,
     QStyle, QStyledItemDelegate, QToolTip, QMenu, QPushButton, QToolButton, QLineEdit, QCompleter, QScrollArea,
 )
-from PyQt6.QtCore import Qt, QRect, QSize, QTimer
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QKeySequence, QPainter, QPen
 import sys
 
@@ -209,7 +209,10 @@ class TermListWidget(QListWidget):
         return [self.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.count()) if self.item(i).isSelected()]
 
     def mouseMoveEvent(self, event):
-        item = self.itemAt(event.position().toPoint())
+        pos = event.position().toPoint()
+        # Treat the gap between two cards as part of the nearer one, so the tracing doesn't blink off in between
+        gap = QPoint(0, self.spacing())
+        item = self.itemAt(pos) or self.itemAt(pos - gap) or self.itemAt(pos + gap)
         self.term_view.terms_view.hover(item.data(Qt.ItemDataRole.UserRole) if item else None)
         super().mouseMoveEvent(event)
 
